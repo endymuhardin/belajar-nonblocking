@@ -8,6 +8,7 @@ import java.nio.channels.SocketChannel;
 public class SingleThreadNonBlockingEchoServer {
     private static final Integer port = 10001;
     private static final Integer BUFFER_SIZE = 10;
+    public static final int LOOP_DELAY = 1 * 1000;
 
     public static void main(String[] args) throws Exception {
         ServerSocketChannel ssc = ServerSocketChannel.open();
@@ -15,13 +16,13 @@ public class SingleThreadNonBlockingEchoServer {
         ssc.bind(new InetSocketAddress(port));
 
         while (true) {
-            Thread.sleep(1000);
+            Thread.sleep(LOOP_DELAY);
             System.out.println("Menunggu ada yang connect di port "+port);
 
             SocketChannel sc = ssc.accept();
             while (sc == null) {
                 System.out.println("Belum ada yang connect .... ");
-                Thread.sleep(1000);
+                Thread.sleep(LOOP_DELAY);
                 sc = ssc.accept();
             }
 
@@ -34,7 +35,7 @@ public class SingleThreadNonBlockingEchoServer {
 
                 if (bytesRead < 1) {
                     System.out.println("Belum ada data ...");
-                    Thread.sleep(1000);
+                    Thread.sleep(LOOP_DELAY);
                     continue;
                 }
 
