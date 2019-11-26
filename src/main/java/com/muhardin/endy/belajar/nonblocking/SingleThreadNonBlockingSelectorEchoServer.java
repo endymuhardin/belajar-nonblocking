@@ -23,7 +23,7 @@ public class SingleThreadNonBlockingSelectorEchoServer {
 
         ssc.register(selector, SelectionKey.OP_ACCEPT);
 
-        loopselector: while(true) {
+        while (true) {
             selector.select();
             Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
             while (keys.hasNext()) {
@@ -34,24 +34,23 @@ public class SingleThreadNonBlockingSelectorEchoServer {
                     SocketChannel sc = ssc.accept();
                     sc.configureBlocking(false);
                     sc.register(selector, SelectionKey.OP_READ);
-                }
-                else if(key.isReadable()){
+                } else if (key.isReadable()) {
                     System.out.println("Socket sudah ada datanya, siap dibaca");
                     SocketChannel sc = (SocketChannel) key.channel();
                     ByteBuffer buffer = ByteBuffer.allocate(BUFFER_SIZE);
 
                     System.out.println("Baca data ...");
                     int bytesRead = sc.read(buffer);
-                    System.out.println("Membaca data sebanyak "+bytesRead+" byte");
+                    System.out.println("Membaca data sebanyak " + bytesRead + " byte");
 
                     buffer.flip();
                     byte[] data = new byte[buffer.limit()];
                     buffer.get(data);
                     String strData = new String(data);
-                    System.out.print("Client> "+strData);
+                    System.out.print("Client> " + strData);
                     buffer.clear();
 
-                    String strReply = "S>"+strData.toUpperCase();
+                    String strReply = "S>" + strData.toUpperCase();
                     buffer.put(strReply.getBytes());
                     buffer.flip();
                     key.attach(buffer);
