@@ -21,13 +21,11 @@ import java.util.function.Function;
 
 public class ReactiveEchoServer {
 
-    private static final Integer port = 10001;
-
     public static void main(String[] args) {
-        ReactiveEchoServer.create("localhost", port)
-                .handle(c -> c
-                    .terimaData()
-                    .map(b -> {
+        ReactiveEchoServer.create(10001)
+                .setProsesBisnis(c -> c  // terima Koneksi dan harus return Mono<Void>
+                    .terimaData()        // return Flux<ByteBuffer>
+                    .map(b -> {          // terima ByteBuffer dan harus return ByteBuffer lagi
                         byte[] data = new byte[b.limit()];
                         b.get(data);
                         String msg = new String(data);
@@ -35,21 +33,25 @@ public class ReactiveEchoServer {
 
                         String reply = "S>" + msg.toUpperCase();
                         return ByteBuffer.wrap(reply.getBytes());
-                    }).as(c::kirimData)
+                    }).as(c::kirimData)  // terima Flux<ByteBuffer> dan harus return Mono<Void>
                 )
                 .start()
                 .block();
     }
 
-    public static ReactiveEchoServer create(String host, Integer port){
-        return new ReactiveEchoServer(host, port);
+    public static ReactiveEchoServer create( Integer port){
+        return new ReactiveEchoServer(port);
     }
 
     private InetSocketAddress inetAddress;
-    private Function<Koneksi, Mono<Void>> koneksi;
+    private Function<Koneksi, Mono<Void>> prosesBisnis;
 
-    public ReactiveEchoServer handle(Function<Koneksi, Mono<Void>> k){
-        this.koneksi = k;
+    private ReactiveEchoServer(Integer port) {
+        this.inetAddress = new InetSocketAddress(port);
+    }
+
+    public ReactiveEchoServer setProsesBisnis(Function<Koneksi, Mono<Void>> pb){
+        this.prosesBisnis = pb;
         return this;
     }
 
@@ -57,17 +59,18 @@ public class ReactiveEchoServer {
         return Flux
                 .push(sink -> {
                     try {
-                        Map<SocketChannel, Tuple2<FluxSink<SelectionKey>, FluxSink<SelectionKey>>> daftarKoneksi
-                                = new HashMap<>();
+                        // simpan selector read dan write untuk socket yang sedang connect (support multi socket)
+                        Map<SocketChannel, Tuple2<FluxSink<SelectionKey>, FluxSink<SelectionKey>>>
+                                daftarKoneksi = new HashMap<>();
 
                         ServerSocketChannel ssc = ServerSocketChannel.open();
                         ssc.configureBlocking(false);
 
-                        System.out.println("Menunggu koneksi di port " + port);
-                        ssc.bind(new InetSocketAddress(port));
+                        System.out.println("Menunggu koneksi di port " + inetAddress.getPort());
+                        ssc.bind(inetAddress);
 
                         Selector selector = Selector.open();
-                        ssc.register(selector, SelectionKey.OP_ACCEPT);
+                        ssc.register(selector, SelectionKey.OP_ACCEPT);  // listen koneksi masuk (accepted)
 
                         sink.onDispose(() -> {
                             try {
@@ -77,8 +80,9 @@ public class ReactiveEchoServer {
                             }
                         });
 
+                        // loop terus selama belum disetop
                         while (!sink.isCancelled()) {
-                            selector.select();
+                            selector.select();  // blocking, menunggu event ACCEPT
                             Iterator<SelectionKey> keys = selector.selectedKeys().iterator();
                             while (keys.hasNext()) {
                                 SelectionKey key = keys.next();
@@ -88,22 +92,31 @@ public class ReactiveEchoServer {
                                     SocketChannel sc = ssc.accept();
                                     sc.configureBlocking(false);
 
-                                    UnicastProcessor<SelectionKey> reader = UnicastProcessor.create(Queues.<SelectionKey>one().get());
-                                    UnicastProcessor<SelectionKey> writer = UnicastProcessor.create(Queues.<SelectionKey>one().get());
+                                    // tempat penyimpanan selector READ
+                                    UnicastProcessor<SelectionKey> reader
+                                            = UnicastProcessor.create(Queues.<SelectionKey>one().get());
 
+                                    // tempat penyimpanan selector WRITE
+                                    UnicastProcessor<SelectionKey> writer
+                                            = UnicastProcessor.create(Queues.<SelectionKey>one().get());
+
+                                    // simpan kombinasi socket dengan selector read & write
                                     daftarKoneksi.put(sc, Tuples.of(reader.sink(), writer.sink()));
 
+                                    // buat object yang akan menjalankan proses bisnisnya
+                                    // kalo mau canggih, harusnya Koneksi ini command pattern
                                     Koneksi k = new Koneksi(sc, key, reader, writer);
-                                    sink.next(koneksi.apply(k).subscribe());
-                                } else if (key.isReadable()) {
-                                    daftarKoneksi.get(key.channel())
-                                            .getT1()
-                                            .next(key);
 
-                                } else if (key.isWritable()) {
+                                    // jalankan proses bisnis
+                                    sink.next(prosesBisnis.apply(k).subscribe());
+                                } else if (key.isReadable()) { // handle event ready to READ
                                     daftarKoneksi.get(key.channel())
-                                            .getT2()
-                                            .next(key);
+                                            .getT1() // T1 berisi selector READ
+                                            .next(key); // jalankan proses bisnis yang handle data masuk
+                                } else if (key.isWritable()) {  // handle event ready to WRITE
+                                    daftarKoneksi.get(key.channel())
+                                            .getT2() // T2 berisi selector WRITE
+                                            .next(key); // jalankan proses bisnis untuk kirim data
                                 } else {
                                     System.out.println("Ready Ops : " + key.readyOps());
                                 }
@@ -116,12 +129,11 @@ public class ReactiveEchoServer {
                 .subscribeOn(Schedulers.newSingle(ReactiveEchoServer.class.getName()))
                 .then();
     }
-
-    private ReactiveEchoServer(String host, Integer port) {
-        this.inetAddress = InetSocketAddress.createUnresolved(host, port);
-    }
 }
 
+// proses bisnis untuk menghandle koneksi
+// isinya sebetulnya adalah wrapper dari Java NIO menjadi Reactor
+// proses bisnis yang sebenarnya disupply dengan function di main method
 class Koneksi extends BaseSubscriber<ByteBuffer> implements AutoCloseable {
 
     private static final Integer BUFFER_SIZE = 10;
@@ -142,19 +154,21 @@ class Koneksi extends BaseSubscriber<ByteBuffer> implements AutoCloseable {
         this.scheduler = Schedulers.single(Schedulers.parallel());
     }
 
+    // ini dijalankan apabila SelectionKey.OP_READ terjadi
     Flux<ByteBuffer> terimaData(){
         return readSelector
                 .doOnSubscribe(s -> {
                     Selector selector = currentSelector.selector();
                     try {
+                        // registrasi selector OP_READ
                         socketChannel.register(selector, SelectionKey.OP_READ);
-                        selector.wakeup();
+                        selector.wakeup(); // pindahkan thread yang menunggu select ke sini
                     } catch (ClosedChannelException e) {
                         e.printStackTrace();
                     }
                 })
                 .doOnNext(selectionKey -> {
-                    currentSelector = selectionKey;
+                    currentSelector = selectionKey; // pindahkan key ke instance variable
                 })
                 .doOnCancel(() -> {
                     try {
@@ -163,7 +177,7 @@ class Koneksi extends BaseSubscriber<ByteBuffer> implements AutoCloseable {
                         e.printStackTrace();
                     }
                 })
-                .handle((key, sink) -> {
+                .handle((key, sink) -> {  // proses baca data dan return ByteBuffer berisi data dibungkus dalam Flux
                     try {
                         System.out.println("Socket sudah ada datanya, siap dibaca");
                         SocketChannel sc = (SocketChannel) key.channel();
@@ -182,30 +196,35 @@ class Koneksi extends BaseSubscriber<ByteBuffer> implements AutoCloseable {
                 });
     }
 
+    // dijalankan pada saat SelectionKey.OP_WRITE terjadi
     Mono<Void> kirimData(Publisher<ByteBuffer> message) {
         return Mono.fromRunnable(() -> {
+            // cukup subscribe saja, agar data diproses
+            // proses bisnis sebenarnya ada di method hookOnXxx
             message.subscribe(this);
         });
     }
 
+    // start listening hanya kalau sudah ada yang subscribe
     @Override
     protected void hookOnSubscribe(Subscription subscription) {
         writeSelector
                 .doOnNext(key -> {
                     currentSelector = key;
-                    key.interestOps(SelectionKey.OP_READ);
+                    key.interestOps(SelectionKey.OP_READ); // setelah selesai kirim data, standby terima lagi
                 })
                 .subscribe(key -> {
-                    hookOnNext(currentBuffer);
+                    hookOnNext(currentBuffer);  // proses data dalam ByteBuffer
                 });
-        subscription.request(1);
+        subscription.request(1); // minta data yang ingin dikirim
     }
 
+    // kirim data dalam ByteBuffer
     @Override
     protected void hookOnNext(ByteBuffer byteBuffer) {
         int bytesWrite;
         try {
-            bytesWrite = socketChannel.write(byteBuffer);
+            bytesWrite = socketChannel.write(byteBuffer); // kirim data ke socket
         } catch (IOException e) {
             e.printStackTrace();
             throw new UncheckedIOException(e);
@@ -216,6 +235,8 @@ class Koneksi extends BaseSubscriber<ByteBuffer> implements AutoCloseable {
             return;
         }
 
+        // selama masih ada data yang mau dikirim, jangan pindah ke mode listening dulu
+        // proses menulis data nonblocking, jadi harus tunggu event OP_WRITE (socket siap kirim data)
         if (byteBuffer.hasRemaining()) {
             currentBuffer = byteBuffer;
             SelectionKey key = currentSelector;
@@ -230,5 +251,6 @@ class Koneksi extends BaseSubscriber<ByteBuffer> implements AutoCloseable {
     @Override
     public void close() throws Exception {
         System.out.println("Close");
+        this.currentSelector.channel().close();
     }
 }
